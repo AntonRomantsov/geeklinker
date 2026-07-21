@@ -1,0 +1,8 @@
+functions-framework>=3.8
+gspread>=6.1
+google-auth>=2.35
+feedparser>=6.0
+python-dateutil>=2.9
+requests>=2.32
+google-genai>=0.3
+python-dotenv>=1.0
