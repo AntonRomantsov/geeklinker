@@ -12,6 +12,10 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 HYPERLINK_RE = re.compile(r'^=HYPERLINK\("([^"]*)"\s*[,;]\s*"(?:[^"]|"")*"\)$', re.IGNORECASE)
 
+TARGET_SHEET_HEADERS = ["Источник", "Ссылка ", "Дата"]
+DEFAULT_COLUMN_WIDTH_PX = 100
+LINK_COLUMN_WIDTH_PX = DEFAULT_COLUMN_WIDTH_PX * 3
+
 
 @dataclass
 class SourceRow:
@@ -56,9 +60,13 @@ class SheetsClient:
         return {row[0] for row in rows if row and row[0]}
 
     def load_sheet_links(self, sheet_name: str) -> set[str]:
+        try:
+            worksheet = self._spreadsheet.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            return set()
         # FORMULA, чтобы достать исходный url из гиперссылки в колонке B,
         # а не отображаемый текст (title).
-        rows = self._spreadsheet.worksheet(sheet_name).get_all_values(value_render_option="FORMULA")[1:]
+        rows = worksheet.get_all_values(value_render_option="FORMULA")[1:]
         return {_extract_link(row[1]) for row in rows if len(row) > 1 and row[1]}
 
     def append_dedup(self, link: str, pub_date: str) -> None:
@@ -67,10 +75,35 @@ class SheetsClient:
         )
 
     def append_article(self, sheet_name: str, site_name: str, link: str, title: str, pub_date: str) -> None:
+        worksheet = self._get_or_create_target_sheet(sheet_name)
         formula = _hyperlink_formula(link, title, self._formula_separator)
-        self._spreadsheet.worksheet(sheet_name).append_row(
-            [site_name, formula, pub_date], value_input_option="USER_ENTERED"
-        )
+        worksheet.append_row([site_name, formula, pub_date], value_input_option="USER_ENTERED")
+
+    def _get_or_create_target_sheet(self, sheet_name: str) -> gspread.Worksheet:
+        try:
+            return self._spreadsheet.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = self._spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=len(TARGET_SHEET_HEADERS))
+            worksheet.append_row(TARGET_SHEET_HEADERS, value_input_option="USER_ENTERED")
+            self._spreadsheet.batch_update(
+                {
+                    "requests": [
+                        {
+                            "updateDimensionProperties": {
+                                "range": {
+                                    "sheetId": worksheet.id,
+                                    "dimension": "COLUMNS",
+                                    "startIndex": 1,
+                                    "endIndex": 2,
+                                },
+                                "properties": {"pixelSize": LINK_COLUMN_WIDTH_PX},
+                                "fields": "pixelSize",
+                            }
+                        }
+                    ]
+                }
+            )
+            return worksheet
 
 
 def _hyperlink_formula(url: str, title: str, separator: str) -> str:
