@@ -1,0 +1,19 @@
+steps:
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - functions
+      - deploy
+      - geeklinker-bot
+      - --gen2
+      - --region=europe-west1
+      - --runtime=python312
+      - --entry-point=run
+      - --trigger-http
+      - --no-allow-unauthenticated
+      - --service-account=geeklinker-bot@geeklinker-bot.iam.gserviceaccount.com
+      - --set-env-vars=SPREADSHEET_ID=1wSKEh8clYuF4ekTMjv1w8L5l9pt8Adpzj0xlmuiEKWQ,TELEGRAM_CHAT_ID=254603322,GEMINI_MODEL=gemini-3.1-flash-lite
+      - --set-secrets=TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,GEMINI_API_KEY=gemini-api-key:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY
