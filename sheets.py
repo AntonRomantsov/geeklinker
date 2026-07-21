@@ -13,8 +13,7 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 HYPERLINK_RE = re.compile(r'^=HYPERLINK\("([^"]*)"\s*[,;]\s*"(?:[^"]|"")*"\)$', re.IGNORECASE)
 
 TARGET_SHEET_HEADERS = ["Источник", "Ссылка ", "Дата"]
-DEFAULT_COLUMN_WIDTH_PX = 100
-LINK_COLUMN_WIDTH_PX = DEFAULT_COLUMN_WIDTH_PX * 3
+TARGET_SHEET_COLUMN_WIDTHS_PX = [200, 500, 100]
 
 
 @dataclass
@@ -93,13 +92,14 @@ class SheetsClient:
                                 "range": {
                                     "sheetId": worksheet.id,
                                     "dimension": "COLUMNS",
-                                    "startIndex": 1,
-                                    "endIndex": 2,
+                                    "startIndex": i,
+                                    "endIndex": i + 1,
                                 },
-                                "properties": {"pixelSize": LINK_COLUMN_WIDTH_PX},
+                                "properties": {"pixelSize": width},
                                 "fields": "pixelSize",
                             }
                         }
+                        for i, width in enumerate(TARGET_SHEET_COLUMN_WIDTHS_PX)
                     ]
                 }
             )

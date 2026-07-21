@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import time
+
 import requests
 
 from config import Config
 from feeds import Article
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
+SEND_DELAY_SECONDS = 0.4
 
 
 def _send(cfg: Config, chat_id: str, text: str) -> None:
@@ -29,6 +32,8 @@ def send_new_article(cfg: Config, site_name: str, group_name: str, item: Article
         f'   <a href="{item.link}">{item.title}</a>'
     )
     _send(cfg, cfg.telegram_chat_id, text)
+    # Пауза, чтобы не словить 429 Too Many Requests при пачке новых статей подряд в один чат.
+    time.sleep(SEND_DELAY_SECONDS)
 
 
 def send_error_alert(cfg: Config, errors: list[str]) -> None:
