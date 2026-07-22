@@ -18,8 +18,18 @@ TARGET_SHEET_HEADERS = ["Источник", "Ссылка ", "Дата"]
 TARGET_SHEET_COLUMN_WIDTHS_PX = [200, 500, 100]
 
 LOG_SHEET_NAME = "Логи"
-LOG_SHEET_HEADERS = ["Дата и время", "Статус", "Новых статей", "Ошибок", "Удалено из _Dedup", "Детали ошибок"]
-LOG_SHEET_COLUMN_WIDTHS_PX = [140, 160, 90, 70, 110, 500]
+LOG_SHEET_HEADERS = [
+    "Дата и время",
+    "Статус",
+    "Новых статей",
+    "Ошибок",
+    "Удалено из _Dedup",
+    "Детали ошибок",
+    "Обработано",
+]
+LOG_SHEET_COLUMN_WIDTHS_PX = [140, 160, 90, 70, 110, 500, 100]
+LOG_RETENTION_ROWS = 30
+LOG_KEEP_VALUES = {"нет", "0", ""}
 
 LOG_STATUS_LABELS = {
     "success": "Успех",
@@ -139,15 +149,14 @@ class SheetsClient:
         worksheet = self._get_or_create_log_sheet()
         timestamp = datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%d.%m.%Y %H:%M:%S")
         label = LOG_STATUS_LABELS[status]
-        result = worksheet.append_row(
-            [timestamp, label, new_articles, errors_count, dedup_removed, error_details],
+        processed = "да" if status == "success" else "нет"
+
+        # Новые записи вставляются сразу после заголовка - остальные сдвигаются вниз.
+        worksheet.insert_row(
+            [timestamp, label, new_articles, errors_count, dedup_removed, error_details, processed],
+            index=2,
             value_input_option="USER_ENTERED",
         )
-        updated_range = result.get("updates", {}).get("updatedRange", "")
-        match = re.search(r"![A-Z]+(\d+)", updated_range)
-        if not match:
-            return
-        row_index = int(match.group(1)) - 1
         self._spreadsheet.batch_update(
             {
                 "requests": [
@@ -155,8 +164,8 @@ class SheetsClient:
                         "repeatCell": {
                             "range": {
                                 "sheetId": worksheet.id,
-                                "startRowIndex": row_index,
-                                "endRowIndex": row_index + 1,
+                                "startRowIndex": 1,
+                                "endRowIndex": 2,
                                 "startColumnIndex": 0,
                                 "endColumnIndex": len(LOG_SHEET_HEADERS),
                             },
@@ -167,6 +176,23 @@ class SheetsClient:
                 ]
             }
         )
+
+        self._prune_log_sheet(worksheet)
+
+    def _prune_log_sheet(self, worksheet: gspread.Worksheet) -> None:
+        rows = worksheet.get_all_values()
+        if len(rows) <= LOG_RETENTION_ROWS + 1:
+            return  # заголовок + до 30 записей - трогать нечего
+
+        rows_to_delete = []
+        for sheet_row_number in range(LOG_RETENTION_ROWS + 2, len(rows) + 1):
+            row = rows[sheet_row_number - 1]
+            processed_value = row[6].strip().lower() if len(row) > 6 else ""
+            if processed_value not in LOG_KEEP_VALUES:
+                rows_to_delete.append(sheet_row_number)
+
+        for sheet_row_number in sorted(rows_to_delete, reverse=True):
+            worksheet.delete_rows(sheet_row_number)
 
     def _get_or_create_log_sheet(self) -> gspread.Worksheet:
         try:
