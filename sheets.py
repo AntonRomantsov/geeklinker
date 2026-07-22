@@ -83,6 +83,13 @@ class SheetsClient:
                 )
         return sources
 
+    def load_all_source_urls(self) -> list[str]:
+        """Все URL из blog_config, независимо от статуса активен/неактивен - используется,
+        чтобы понять, какие домены всё ещё "известны" конфигу (для чистки _Dedup от
+        полностью удалённых источников)."""
+        rows = self._spreadsheet.worksheet(self._cfg.config_sheet_name).get_all_values()[1:]
+        return [row[1].strip() for row in rows if len(row) > 1 and row[1].strip()]
+
     def update_source_type(self, row_number: int, url: str, source_type: str) -> None:
         worksheet = self._spreadsheet.worksheet(self._cfg.config_sheet_name)
         worksheet.update(f"B{row_number}:C{row_number}", [[url, source_type]], value_input_option="USER_ENTERED")

@@ -7,7 +7,7 @@ import requests
 
 from bot_webhook import telegram_webhook  # noqa: F401 - должна быть видна в main.py для functions-framework
 from config import Config
-from dedup_cleanup import cleanup_site
+from dedup_cleanup import cleanup_orphaned_domains, cleanup_site
 from feeds import fetch_rss_items, fetch_scrape_items
 from notify import send_blocked_source_warning, send_error_alert, send_fatal_alert, send_new_article
 from rss_discovery import discover_feed_url, is_allowed_by_robots
@@ -141,6 +141,12 @@ def execute(dry_run: bool = False) -> str:
             dedup_removed += cleanup_site(cfg, sheets, site_name, active_sources)
         except Exception as exc:  # noqa: BLE001 - чистка не должна ронять весь прогон
             other_errors.append((f"Чистка _Dedup для «{site_name}»: {exc}", _is_transient_error(exc)))
+
+    try:
+        all_config_urls = sheets.load_all_source_urls()
+        dedup_removed += cleanup_orphaned_domains(cfg, sheets, all_config_urls)
+    except Exception as exc:  # noqa: BLE001 - чистка не должна ронять весь прогон
+        other_errors.append((f"Чистка _Dedup от удалённых источников: {exc}", _is_transient_error(exc)))
 
     # В Telegram уходят только ошибки обработки источников, которые не транзиентные -
     # временные внешние сбои (403/429/5xx, таймауты) и ошибки чистки _Dedup туда не пишем.

@@ -65,3 +65,34 @@ def cleanup_site(cfg: Config, sheets: SheetsClient, site_name: str, all_sources:
         dedup_ws.update("A1", [header] + rows_to_keep, value_input_option="USER_ENTERED")
 
     return removed
+
+
+def cleanup_orphaned_domains(cfg: Config, sheets: SheetsClient, all_config_urls: list[str]) -> int:
+    """Удаляет из _Dedup записи, чей домен не встречается вообще ни в одной строке blog_config
+    (активной или нет) - источник был полностью удалён из конфига, сверяться не с чем,
+    так что удаляем без проверки даты. Возвращает число удалённых строк."""
+    known_domains = {urlparse(url).netloc for url in all_config_urls if url}
+
+    dedup_ws = sheets._spreadsheet.worksheet(cfg.dedup_sheet_name)
+    rows = dedup_ws.get_all_values()
+    if not rows:
+        return 0
+    header, data_rows = rows[0], rows[1:]
+
+    rows_to_keep = []
+    removed = 0
+    for row in data_rows:
+        if not row or not row[0]:
+            rows_to_keep.append(row)
+            continue
+        domain = urlparse(row[0]).netloc
+        if domain and domain not in known_domains:
+            removed += 1
+            continue
+        rows_to_keep.append(row)
+
+    if removed:
+        dedup_ws.clear()
+        dedup_ws.update("A1", [header] + rows_to_keep, value_input_option="USER_ENTERED")
+
+    return removed
