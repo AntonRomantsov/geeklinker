@@ -106,7 +106,10 @@ def execute() -> str:
     # временные внешние сбои (403/429/5xx, таймауты) и ошибки чистки _Dedup туда не пишем.
     telegram_worthy = [message for message, transient in source_errors if not transient]
     if telegram_worthy:
-        send_error_alert(cfg, telegram_worthy)
+        try:
+            send_error_alert(cfg, telegram_worthy)
+        except Exception as exc:  # noqa: BLE001 - все данные уже записаны, просто фиксируем как warning
+            other_errors.append((f"Не удалось отправить уведомление в Telegram: {exc}", _is_transient_error(exc)))
 
     all_errors = source_errors + other_errors
     try:
