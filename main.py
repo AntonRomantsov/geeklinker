@@ -111,8 +111,8 @@ def execute() -> str:
     all_errors = source_errors + other_errors
     try:
         if all_errors:
-            for message, _transient in all_errors:
-                sheets.append_run_log("error", new_articles, 1, dedup_removed, message)
+            details = "\n".join(message for message, _transient in all_errors)
+            sheets.append_run_log("error", new_articles, len(all_errors), dedup_removed, details)
         else:
             sheets.append_run_log("success", new_articles, 0, dedup_removed, "")
     except Exception:

@@ -169,10 +169,25 @@ class SheetsClient:
                                 "startColumnIndex": 0,
                                 "endColumnIndex": len(LOG_SHEET_HEADERS),
                             },
-                            "cell": {"userEnteredFormat": {"backgroundColor": LOG_STATUS_COLORS[status]}},
-                            "fields": "userEnteredFormat.backgroundColor",
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "backgroundColor": LOG_STATUS_COLORS[status],
+                                    "wrapStrategy": "WRAP",
+                                }
+                            },
+                            "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.wrapStrategy",
                         }
-                    }
+                    },
+                    {
+                        "autoResizeDimensions": {
+                            "dimensions": {
+                                "sheetId": worksheet.id,
+                                "dimension": "ROWS",
+                                "startIndex": 1,
+                                "endIndex": 2,
+                            }
+                        }
+                    },
                 ]
             }
         )
