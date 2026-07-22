@@ -15,5 +15,21 @@ steps:
       - --set-env-vars=SPREADSHEET_ID=1wSKEh8clYuF4ekTMjv1w8L5l9pt8Adpzj0xlmuiEKWQ,TELEGRAM_CHAT_ID=254603322,GEMINI_MODEL=gemini-3.1-flash-lite
       - --set-secrets=TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,GEMINI_API_KEY=gemini-api-key:latest
 
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - functions
+      - deploy
+      - geeklinker-bot-telegram
+      - --gen2
+      - --region=europe-west1
+      - --runtime=python312
+      - --entry-point=telegram_webhook
+      - --trigger-http
+      - --allow-unauthenticated
+      - --service-account=geeklinker-bot@geeklinker-bot.iam.gserviceaccount.com
+      - --set-env-vars=SPREADSHEET_ID=1wSKEh8clYuF4ekTMjv1w8L5l9pt8Adpzj0xlmuiEKWQ,TELEGRAM_CHAT_ID=254603322,GEMINI_MODEL=gemini-3.1-flash-lite,GCP_PROJECT_ID=geeklinker-bot,GCP_REGION=europe-west1,SCHEDULER_SERVICE_ACCOUNT=geeklinker-bot@geeklinker-bot.iam.gserviceaccount.com,MAIN_FUNCTION_URL=https://europe-west1-geeklinker-bot.cloudfunctions.net/geeklinker-bot
+      - --set-secrets=TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,GEMINI_API_KEY=gemini-api-key:latest,TELEGRAM_WEBHOOK_SECRET=telegram-webhook-secret:latest
+
 options:
   logging: CLOUD_LOGGING_ONLY
