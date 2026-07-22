@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import feedparser
 import requests
 
+from browser_headers import BROWSER_HEADERS
 from config import Config
 from dates import format_date
 from gemini import extract_articles
@@ -23,10 +24,11 @@ class Article:
     pub_date: str
 
 
-def _get_with_retry(url: str, headers: dict) -> requests.Response:
+def _get_with_retry(url: str, headers: dict | None = None) -> requests.Response:
+    merged_headers = {**BROWSER_HEADERS, **(headers or {})}
     attempts = len(RETRY_BACKOFF_SECONDS) + 1
     for attempt in range(attempts):
-        response = requests.get(url, headers=headers, timeout=30)
+        response = requests.get(url, headers=merged_headers, timeout=30)
         if response.status_code not in RETRYABLE_STATUS_CODES or attempt == attempts - 1:
             response.raise_for_status()
             return response
@@ -34,7 +36,7 @@ def _get_with_retry(url: str, headers: dict) -> requests.Response:
 
 
 def fetch_rss_items(url: str) -> list[Article]:
-    parsed = feedparser.parse(url)
+    parsed = feedparser.parse(url, request_headers=BROWSER_HEADERS)
     if parsed.bozo and not parsed.entries:
         raise RuntimeError(f"не удалось разобрать RSS: {parsed.bozo_exception}")
 

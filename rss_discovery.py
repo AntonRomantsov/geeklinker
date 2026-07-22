@@ -5,6 +5,8 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
+from browser_headers import BROWSER_HEADERS
+
 FEED_LINK_RE = re.compile(
     r'<link[^>]+rel=["\']alternate["\'][^>]*type=["\'](?:application/rss\+xml|application/atom\+xml)["\'][^>]*>',
     re.IGNORECASE,
@@ -14,7 +16,7 @@ HREF_RE = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
 
 def discover_feed_url(page_url: str) -> str | None:
     try:
-        response = requests.get(page_url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        response = requests.get(page_url, timeout=20, headers=BROWSER_HEADERS)
         response.raise_for_status()
     except requests.exceptions.RequestException:
         return None
@@ -76,7 +78,7 @@ def is_allowed_by_robots(url: str) -> bool:
     robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
 
     try:
-        response = requests.get(robots_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        response = requests.get(robots_url, timeout=15, headers=BROWSER_HEADERS)
     except requests.exceptions.RequestException:
         return False  # не удалось проверить - консервативно считаем запрещённым
 
