@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import functions_framework
 import requests
 
@@ -28,7 +30,7 @@ def _is_transient_error(exc: Exception) -> bool:
     return False
 
 
-def execute() -> str:
+def execute(dry_run: bool = False) -> str:
     cfg = Config.from_env()
 
     try:
@@ -36,6 +38,8 @@ def execute() -> str:
         active_sources = sheets.load_active_sources()
         dedup_links = sheets.load_dedup_links()
     except Exception as exc:
+        if dry_run:
+            raise
         # Настройка не удалась - дальнейшая обработка в этом запуске невозможна.
         send_fatal_alert(cfg, str(exc))
         try:
@@ -43,6 +47,8 @@ def execute() -> str:
         except Exception:
             pass  # если и лог записать не получилось - не мешаем исходному исключению всплыть
         raise
+
+    report: list[str] = ["[DRY RUN] Ничего не записано в таблицы, уведомления не отправлены.\n"] if dry_run else []
 
     target_sheet_cache: dict[str, set[str]] = {}
     source_errors: list[tuple[str, bool]] = []  # (сообщение, транзиентная ли ошибка)
@@ -53,7 +59,10 @@ def execute() -> str:
     for source in active_sources:
         try:
             if source.source_type == BLOCKED_TYPE:
-                send_blocked_source_warning(cfg, source.site_name, source.url)
+                if dry_run:
+                    report.append(f"{source.site_name}: заблокирован (!blocked), пропущен")
+                else:
+                    send_blocked_source_warning(cfg, source.site_name, source.url)
                 continue
 
             if source.source_type not in ("rss", "scrape"):
@@ -61,14 +70,24 @@ def execute() -> str:
                 if feed_url and is_allowed_by_robots(feed_url):
                     source.url = feed_url
                     source.source_type = "rss"
+                    if dry_run:
+                        report.append(f"{source.site_name}: определился бы как rss ({feed_url})")
+                    else:
+                        sheets.update_source_type(source.row_number, source.url, source.source_type)
                 elif is_allowed_by_robots(source.url):
                     source.source_type = "scrape"
+                    if dry_run:
+                        report.append(f"{source.site_name}: определился бы как scrape")
+                    else:
+                        sheets.update_source_type(source.row_number, source.url, source.source_type)
                 else:
                     source.source_type = BLOCKED_TYPE
-                    sheets.update_source_type(source.row_number, source.url, source.source_type)
-                    send_blocked_source_warning(cfg, source.site_name, source.url)
+                    if dry_run:
+                        report.append(f"{source.site_name}: стал бы !blocked (запрещён и rss, и scrape)")
+                    else:
+                        sheets.update_source_type(source.row_number, source.url, source.source_type)
+                        send_blocked_source_warning(cfg, source.site_name, source.url)
                     continue
-                sheets.update_source_type(source.row_number, source.url, source.source_type)
 
             target_links = target_sheet_cache.setdefault(
                 source.target_sheet, sheets.load_sheet_links(source.target_sheet)
@@ -79,21 +98,42 @@ def execute() -> str:
             else:
                 items = fetch_scrape_items(source.url, cfg)
 
+            source_new = 0
             for item in items:
                 if item.link in dedup_links or item.link in target_links:
                     continue
 
-                sheets.append_dedup(item.link, item.pub_date)
-                sheets.append_article(source.target_sheet, source.site_name, item.link, item.title, item.pub_date)
-                send_new_article(cfg, source.site_name, source.target_sheet, item)
+                if dry_run:
+                    report.append(
+                        f"{source.site_name} -> {source.target_sheet}: "
+                        f'новая статья "{item.title}" — {item.link} ({item.pub_date})'
+                    )
+                else:
+                    sheets.append_dedup(item.link, item.pub_date)
+                    sheets.append_article(
+                        source.target_sheet, source.site_name, item.link, item.title, item.pub_date
+                    )
+                    send_new_article(cfg, source.site_name, source.target_sheet, item)
 
                 dedup_links.add(item.link)
                 target_links.add(item.link)
                 new_articles += 1
+                source_new += 1
                 sites_with_new_articles.add(source.site_name)
 
+            if dry_run and source_new == 0:
+                report.append(f"{source.site_name}: новых статей нет")
+
         except Exception as exc:  # noqa: BLE001 - источник не обработан, но остальные продолжаем
-            source_errors.append((f"{source.site_name} ({source.url}): {exc}", _is_transient_error(exc)))
+            message = f"{source.site_name} ({source.url}): {exc}"
+            if dry_run:
+                report.append(f"ОШИБКА: {message}")
+            else:
+                source_errors.append((message, _is_transient_error(exc)))
+
+    if dry_run:
+        report.append(f"\nИтого: новых статей нашлось бы {new_articles}.")
+        return "\n".join(report)
 
     dedup_removed = 0
     for site_name in sites_with_new_articles:
@@ -130,8 +170,9 @@ def execute() -> str:
 
 @functions_framework.http
 def run(request):
-    return execute()
+    dry_run = request.args.get("dry_run", "").lower() in ("1", "true", "yes")
+    return execute(dry_run=dry_run)
 
 
 if __name__ == "__main__":
-    print(execute())
+    print(execute(dry_run="--dry-run" in sys.argv))
