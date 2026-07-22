@@ -22,6 +22,7 @@ class SourceRow:
     url: str
     source_type: str
     target_sheet: str
+    row_number: int
 
 
 FORMULA_LOCALES_WITH_SEMICOLON_SEPARATOR = {"ru", "uk", "de", "fr", "es", "it", "pl", "pt", "tr", "nl"}
@@ -39,7 +40,7 @@ class SheetsClient:
     def load_active_sources(self) -> list[SourceRow]:
         rows = self._spreadsheet.worksheet(self._cfg.config_sheet_name).get_all_values()[1:]
         sources = []
-        for row in rows:
+        for i, row in enumerate(rows, start=2):
             if len(row) < 6:
                 continue
             site_name, url, source_type, target_sheet, _engine, status = row[:6]
@@ -50,9 +51,14 @@ class SheetsClient:
                         url=url.strip(),
                         source_type=source_type.strip().lower(),
                         target_sheet=target_sheet.strip(),
+                        row_number=i,
                     )
                 )
         return sources
+
+    def update_source_type(self, row_number: int, url: str, source_type: str) -> None:
+        worksheet = self._spreadsheet.worksheet(self._cfg.config_sheet_name)
+        worksheet.update(f"B{row_number}:C{row_number}", [[url, source_type]], value_input_option="USER_ENTERED")
 
     def load_dedup_links(self) -> set[str]:
         rows = self._spreadsheet.worksheet(self._cfg.dedup_sheet_name).get_all_values()[1:]
