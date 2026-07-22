@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import google.auth.transport.requests
+import google.oauth2.id_token
+import requests
 from google.api_core.exceptions import GoogleAPICallError
 from google.cloud import scheduler_v1
 from google.protobuf import field_mask_pb2
@@ -84,5 +87,30 @@ class SchedulerAdmin:
     def resume_job(self, name: str) -> scheduler_v1.Job:
         return self._client.resume_job(name=self._full_name(name))
 
-    def run_job(self, name: str) -> scheduler_v1.Job:
-        return self._client.run_job(name=self._full_name(name))
+    def run_job(self, name: str) -> None:
+        # Cloud Scheduler's RunJob API отказывает с FAILED_PRECONDITION, если график на паузе
+        # ("Job.state must be ENABLED for RunJob"). Чтобы запуск работал независимо от состояния
+        # графика, вызываем целевой URL напрямую с тем же OIDC-токеном, что использовал бы Scheduler.
+        #
+        # Ответа не ждём: сам прогон может занимать несколько минут, а Telegram ожидает быстрый
+        # ответ от webhook и может повторно прислать то же нажатие кнопки, если не дождётся —
+        # тогда получится повторный (дублирующий) запуск. Короткого таймаута достаточно, чтобы
+        # убедиться, что запрос принят и функция начала выполняться; дальше она работает независимо.
+        job = self.get_job(name)
+        if job is None:
+            raise SchedulerError(f"График «{name}» не найден.")
+
+        target_uri = job.http_target.uri
+        auth_request = google.auth.transport.requests.Request()
+        id_token = google.oauth2.id_token.fetch_id_token(auth_request, target_uri)
+
+        try:
+            requests.post(
+                target_uri,
+                headers={"Authorization": f"Bearer {id_token}"},
+                timeout=(10, 10),
+            )
+        except requests.exceptions.Timeout:
+            pass  # запрос отправлен и принят, функция продолжает выполняться — это ожидаемо
+        except requests.exceptions.RequestException as exc:
+            raise SchedulerError(f"Не удалось запустить график: {exc}") from exc
