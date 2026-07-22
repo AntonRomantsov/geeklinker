@@ -4,6 +4,7 @@ import functions_framework
 
 from bot_webhook import telegram_webhook  # noqa: F401 - должна быть видна в main.py для functions-framework
 from config import Config
+from dedup_cleanup import cleanup_site
 from feeds import fetch_rss_items, fetch_scrape_items
 from notify import send_blocked_source_warning, send_error_alert, send_new_article
 from rss_discovery import discover_feed_url, is_allowed_by_robots
@@ -20,8 +21,11 @@ def execute() -> str:
     target_sheet_cache: dict[str, set[str]] = {}
     errors: list[str] = []
     new_articles = 0
+    sites_with_new_articles: set[str] = set()
 
-    for source in sheets.load_active_sources():
+    active_sources = sheets.load_active_sources()
+
+    for source in active_sources:
         try:
             if source.source_type == BLOCKED_TYPE:
                 send_blocked_source_warning(cfg, source.site_name, source.url)
@@ -61,9 +65,16 @@ def execute() -> str:
                 dedup_links.add(item.link)
                 target_links.add(item.link)
                 new_articles += 1
+                sites_with_new_articles.add(source.site_name)
 
         except Exception as exc:  # noqa: BLE001 - собираем ошибку по источнику и продолжаем остальные
             errors.append(f"{source.site_name} ({source.url}): {exc}")
+
+    for site_name in sites_with_new_articles:
+        try:
+            cleanup_site(cfg, sheets, site_name, active_sources)
+        except Exception as exc:  # noqa: BLE001 - чистка не должна ронять весь прогон
+            errors.append(f"Чистка _Dedup для «{site_name}»: {exc}")
 
     if errors:
         send_error_alert(cfg, errors)
