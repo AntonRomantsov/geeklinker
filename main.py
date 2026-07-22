@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functions_framework
+import requests
 
 from bot_webhook import telegram_webhook  # noqa: F401 - должна быть видна в main.py для functions-framework
 from config import Config
@@ -11,6 +12,20 @@ from rss_discovery import discover_feed_url, is_allowed_by_robots
 from sheets import SheetsClient
 
 BLOCKED_TYPE = "!blocked"
+
+# Ошибки такого рода не связаны с нашим кодом и не постоянны - в теории должны исчезнуть
+# сами собой на следующем прогоне. О них не нужно уведомлять в Telegram, только в лог.
+TRANSIENT_HTTP_STATUS_CODES = {403, 429, 500, 502, 503, 504}
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    if isinstance(exc, requests.exceptions.HTTPError):
+        response = exc.response
+        if response is not None and response.status_code in TRANSIENT_HTTP_STATUS_CODES:
+            return True
+    return False
 
 
 def execute() -> str:
@@ -30,8 +45,8 @@ def execute() -> str:
         raise
 
     target_sheet_cache: dict[str, set[str]] = {}
-    source_errors: list[str] = []
-    other_errors: list[str] = []
+    source_errors: list[tuple[str, bool]] = []  # (сообщение, транзиентная ли ошибка)
+    other_errors: list[tuple[str, bool]] = []
     new_articles = 0
     sites_with_new_articles: set[str] = set()
 
@@ -78,33 +93,35 @@ def execute() -> str:
                 sites_with_new_articles.add(source.site_name)
 
         except Exception as exc:  # noqa: BLE001 - источник не обработан, но остальные продолжаем
-            source_errors.append(f"{source.site_name} ({source.url}): {exc}")
+            source_errors.append((f"{source.site_name} ({source.url}): {exc}", _is_transient_error(exc)))
 
     dedup_removed = 0
     for site_name in sites_with_new_articles:
         try:
             dedup_removed += cleanup_site(cfg, sheets, site_name, active_sources)
         except Exception as exc:  # noqa: BLE001 - чистка не должна ронять весь прогон
-            other_errors.append(f"Чистка _Dedup для «{site_name}»: {exc}")
+            other_errors.append((f"Чистка _Dedup для «{site_name}»: {exc}", _is_transient_error(exc)))
 
-    if source_errors:
-        send_error_alert(cfg, source_errors)
+    # В Telegram уходят только ошибки обработки источников, которые не транзиентные -
+    # временные внешние сбои (403/429/5xx, таймауты) и ошибки чистки _Dedup туда не пишем.
+    telegram_worthy = [message for message, transient in source_errors if not transient]
+    if telegram_worthy:
+        send_error_alert(cfg, telegram_worthy)
 
     all_errors = source_errors + other_errors
     try:
-        sheets.append_run_log(
-            "error" if all_errors else "success",
-            new_articles,
-            len(all_errors),
-            dedup_removed,
-            "; ".join(all_errors),
-        )
+        if all_errors:
+            for message, _transient in all_errors:
+                sheets.append_run_log("error", new_articles, 1, dedup_removed, message)
+        else:
+            sheets.append_run_log("success", new_articles, 0, dedup_removed, "")
     except Exception:
         pass  # не смогли записать лог - не роняем из-за этого сам прогон
 
+    error_messages = [message for message, _transient in all_errors]
     summary = f"Готово. Новых статей: {new_articles}. Ошибок: {len(all_errors)}"
     if all_errors:
-        raise RuntimeError(summary + " | " + "; ".join(all_errors))
+        raise RuntimeError(summary + " | " + "; ".join(error_messages))
     return summary
 
 
