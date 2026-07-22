@@ -9,7 +9,7 @@ from notify import send_blocked_source_warning, send_error_alert, send_new_artic
 from rss_discovery import discover_feed_url, is_allowed_by_robots
 from sheets import SheetsClient
 
-BLOCKED_TYPE = "заблокировано"
+BLOCKED_TYPE = "!blocked"
 
 
 def execute() -> str:
