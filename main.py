@@ -5,9 +5,11 @@ import functions_framework
 from bot_webhook import telegram_webhook  # noqa: F401 - должна быть видна в main.py для functions-framework
 from config import Config
 from feeds import fetch_rss_items, fetch_scrape_items
-from notify import send_error_alert, send_new_article
+from notify import send_blocked_source_warning, send_error_alert, send_new_article
 from rss_discovery import discover_feed_url, is_allowed_by_robots
 from sheets import SheetsClient
+
+BLOCKED_TYPE = "заблокировано"
 
 
 def execute() -> str:
@@ -21,13 +23,22 @@ def execute() -> str:
 
     for source in sheets.load_active_sources():
         try:
+            if source.source_type == BLOCKED_TYPE:
+                send_blocked_source_warning(cfg, source.site_name, source.url)
+                continue
+
             if source.source_type not in ("rss", "scrape"):
                 feed_url = discover_feed_url(source.url)
                 if feed_url and is_allowed_by_robots(feed_url):
                     source.url = feed_url
                     source.source_type = "rss"
-                else:
+                elif is_allowed_by_robots(source.url):
                     source.source_type = "scrape"
+                else:
+                    source.source_type = BLOCKED_TYPE
+                    sheets.update_source_type(source.row_number, source.url, source.source_type)
+                    send_blocked_source_warning(cfg, source.site_name, source.url)
+                    continue
                 sheets.update_source_type(source.row_number, source.url, source.source_type)
 
             target_links = target_sheet_cache.setdefault(

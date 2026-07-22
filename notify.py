@@ -41,3 +41,14 @@ def send_error_alert(cfg: Config, errors: list[str]) -> None:
         f"• {error}" for error in errors
     )
     _send(cfg, cfg.telegram_alert_chat_id, text)
+
+
+def send_blocked_source_warning(cfg: Config, site_name: str, url: str) -> None:
+    text = (
+        f"🚫 <b>Источник «{site_name}» не парсится</b>\n"
+        f"{url}\n\n"
+        "robots.txt запрещает автоматический доступ и к RSS, и к обычной странице. "
+        "Это не техническая ошибка, а осознанный отказ от источника — сайт явно не хочет "
+        "автоматического парсинга. Обработка пропускается."
+    )
+    _send(cfg, cfg.telegram_alert_chat_id, text)
