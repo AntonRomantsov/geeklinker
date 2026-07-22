@@ -25,8 +25,11 @@ HELP_TEXT = (
     "— создать новый график (макс. 3)\n\n"
     "/editjob &lt;имя&gt;\n&lt;новый cron&gt;\n&lt;новая таймзона, необязательно&gt;\n"
     "— изменить расписание существующего графика\n\n"
+    "/dryrun — прогон без записи в таблицы и без уведомлений, с отчётом сюда\n\n"
     "Пример:\n<code>/newjob evening\n0 21 * * *\nEurope/Kyiv</code>"
 )
+
+TELEGRAM_MESSAGE_CHUNK_SIZE = 3500
 
 
 def _call(cfg: Config, method: str, payload: dict) -> dict:
@@ -36,8 +39,12 @@ def _call(cfg: Config, method: str, payload: dict) -> dict:
     return response.json()
 
 
-def _send_message(cfg: Config, chat_id: int, text: str, reply_markup: dict | None = None) -> None:
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+def _send_message(
+    cfg: Config, chat_id: int, text: str, reply_markup: dict | None = None, parse_html: bool = True
+) -> None:
+    payload = {"chat_id": chat_id, "text": text}
+    if parse_html:
+        payload["parse_mode"] = "HTML"
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     _call(cfg, "sendMessage", payload)
@@ -74,6 +81,7 @@ def _menu_keyboard(jobs) -> dict:
         )
     if len(jobs) < 3:
         rows.append([{"text": "➕ Новый график (см. /newjob)", "callback_data": "noop"}])
+    rows.append([{"text": "🧪 Dry-run", "callback_data": "dryrun"}])
     return {"inline_keyboard": rows}
 
 
@@ -81,10 +89,44 @@ def _send_menu(cfg: Config, chat_id: int) -> None:
     admin = SchedulerAdmin(cfg)
     jobs = admin.list_jobs()
     if not jobs:
-        _send_message(cfg, chat_id, "Графиков пока нет. Создайте через /newjob.")
+        _send_message(
+            cfg,
+            chat_id,
+            "Графиков пока нет. Создайте через /newjob.",
+            {"inline_keyboard": [[{"text": "🧪 Dry-run", "callback_data": "dryrun"}]]},
+        )
         return
     text = f"<b>Графики ({len(jobs)}/3):</b>\n\n" + "\n\n".join(_job_line(j) for j in jobs)
     _send_message(cfg, chat_id, text, _menu_keyboard(jobs))
+
+
+def _chunk_text(text: str, size: int) -> list[str]:
+    lines = text.split("\n")
+    chunks = []
+    current = ""
+    for line in lines:
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > size and current:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks or [""]
+
+
+def _handle_dry_run(cfg: Config, chat_id: int) -> None:
+    _send_message(cfg, chat_id, "⏳ Запускаю dry-run...")
+    try:
+        from main import execute  # отложенный импорт - main.py импортирует этот модуль через bot_webhook
+
+        report = execute(dry_run=True)
+    except Exception as exc:  # noqa: BLE001 - показываем пользователю любую причину сбоя
+        _send_message(cfg, chat_id, f"❌ Dry-run упал с ошибкой: {exc}")
+        return
+    for chunk in _chunk_text(report, TELEGRAM_MESSAGE_CHUNK_SIZE):
+        _send_message(cfg, chat_id, chunk, parse_html=False)
 
 
 def _parse_multiline_command(text: str) -> list[str]:
@@ -104,6 +146,10 @@ def _handle_command(cfg: Config, chat_id: int, text: str) -> None:
 
     if command == "/menu":
         _send_menu(cfg, chat_id)
+        return
+
+    if command == "/dryrun":
+        _handle_dry_run(cfg, chat_id)
         return
 
     if command == "/newjob":
@@ -173,6 +219,11 @@ def _handle_callback(cfg: Config, callback_query: dict) -> None:
 
     if data == "noop":
         _answer_callback(cfg, callback_id, "Используйте команду /newjob")
+        return
+
+    if data == "dryrun":
+        _answer_callback(cfg, callback_id)
+        _handle_dry_run(cfg, chat_id)
         return
 
     action, _, name = data.partition("|")
