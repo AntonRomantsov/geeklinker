@@ -94,7 +94,29 @@ def execute(dry_run: bool = False) -> str:
             )
 
             if source.source_type == "rss":
-                items = fetch_rss_items(source.url)
+                try:
+                    items = fetch_rss_items(source.url)
+                except RuntimeError:
+                    # Тип явно "rss", но по этому URL это не фид, а обычная страница -
+                    # ищем реальный фид на ней.
+                    feed_url = discover_feed_url(source.url)
+                    if feed_url:
+                        source.url = feed_url
+                        if dry_run:
+                            report.append(
+                                f"{source.site_name}: в колонке B была страница вместо фида, "
+                                f"урл заменён на найденный ({feed_url})"
+                            )
+                        else:
+                            sheets.update_source_type(source.row_number, source.url, source.source_type)
+                        items = fetch_rss_items(source.url)
+                    else:
+                        source.source_type = "scrape"
+                        if dry_run:
+                            report.append(f"{source.site_name}: фид на странице не найден, переключен на scrape")
+                        else:
+                            sheets.update_source_type(source.row_number, source.url, source.source_type)
+                        items = fetch_scrape_items(source.url, cfg)
             else:
                 items = fetch_scrape_items(source.url, cfg)
 
