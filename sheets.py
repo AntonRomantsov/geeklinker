@@ -32,9 +32,9 @@ LOG_RETENTION_ROWS = 30
 LOG_KEEP_VALUES = {"нет", "0", ""}
 
 LOG_STATUS_LABELS = {
-    "success": "Успех",
-    "error": "Ошибка (не критично)",
-    "fatal": "Критическая ошибка",
+    "success": "success",
+    "error": "warning",
+    "fatal": "error",
 }
 LOG_STATUS_COLORS = {
     "success": {"red": 0.85, "green": 0.94, "blue": 0.85},
