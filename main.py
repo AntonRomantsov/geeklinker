@@ -6,7 +6,7 @@ from bot_webhook import telegram_webhook  # noqa: F401 - должна быть �
 from config import Config
 from dedup_cleanup import cleanup_site
 from feeds import fetch_rss_items, fetch_scrape_items
-from notify import send_blocked_source_warning, send_error_alert, send_new_article
+from notify import send_blocked_source_warning, send_error_alert, send_fatal_alert, send_new_article
 from rss_discovery import discover_feed_url, is_allowed_by_robots
 from sheets import SheetsClient
 
@@ -15,15 +15,25 @@ BLOCKED_TYPE = "!blocked"
 
 def execute() -> str:
     cfg = Config.from_env()
-    sheets = SheetsClient(cfg)
 
-    dedup_links = sheets.load_dedup_links()
+    try:
+        sheets = SheetsClient(cfg)
+        active_sources = sheets.load_active_sources()
+        dedup_links = sheets.load_dedup_links()
+    except Exception as exc:
+        # Настройка не удалась - дальнейшая обработка в этом запуске невозможна.
+        send_fatal_alert(cfg, str(exc))
+        try:
+            SheetsClient(cfg).append_run_log("fatal", 0, 1, 0, str(exc))
+        except Exception:
+            pass  # если и лог записать не получилось - не мешаем исходному исключению всплыть
+        raise
+
     target_sheet_cache: dict[str, set[str]] = {}
-    errors: list[str] = []
+    source_errors: list[str] = []
+    other_errors: list[str] = []
     new_articles = 0
     sites_with_new_articles: set[str] = set()
-
-    active_sources = sheets.load_active_sources()
 
     for source in active_sources:
         try:
@@ -67,21 +77,34 @@ def execute() -> str:
                 new_articles += 1
                 sites_with_new_articles.add(source.site_name)
 
-        except Exception as exc:  # noqa: BLE001 - собираем ошибку по источнику и продолжаем остальные
-            errors.append(f"{source.site_name} ({source.url}): {exc}")
+        except Exception as exc:  # noqa: BLE001 - источник не обработан, но остальные продолжаем
+            source_errors.append(f"{source.site_name} ({source.url}): {exc}")
 
+    dedup_removed = 0
     for site_name in sites_with_new_articles:
         try:
-            cleanup_site(cfg, sheets, site_name, active_sources)
+            dedup_removed += cleanup_site(cfg, sheets, site_name, active_sources)
         except Exception as exc:  # noqa: BLE001 - чистка не должна ронять весь прогон
-            errors.append(f"Чистка _Dedup для «{site_name}»: {exc}")
+            other_errors.append(f"Чистка _Dedup для «{site_name}»: {exc}")
 
-    if errors:
-        send_error_alert(cfg, errors)
+    if source_errors:
+        send_error_alert(cfg, source_errors)
 
-    summary = f"Готово. Новых статей: {new_articles}. Ошибок: {len(errors)}"
-    if errors:
-        raise RuntimeError(summary + " | " + "; ".join(errors))
+    all_errors = source_errors + other_errors
+    try:
+        sheets.append_run_log(
+            "error" if all_errors else "success",
+            new_articles,
+            len(all_errors),
+            dedup_removed,
+            "; ".join(all_errors),
+        )
+    except Exception:
+        pass  # не смогли записать лог - не роняем из-за этого сам прогон
+
+    summary = f"Готово. Новых статей: {new_articles}. Ошибок: {len(all_errors)}"
+    if all_errors:
+        raise RuntimeError(summary + " | " + "; ".join(all_errors))
     return summary
 
 

@@ -43,6 +43,15 @@ def send_error_alert(cfg: Config, errors: list[str]) -> None:
     _send(cfg, cfg.telegram_alert_chat_id, text)
 
 
+def send_fatal_alert(cfg: Config, error_text: str) -> None:
+    text = (
+        "🔴 <b>GeekLinker: критическая ошибка</b>\n\n"
+        f"{error_text}\n\n"
+        "Дальнейшая обработка в этом запуске невозможна."
+    )
+    _send(cfg, cfg.telegram_alert_chat_id, text)
+
+
 def send_blocked_source_warning(cfg: Config, site_name: str, url: str) -> None:
     text = (
         f"🚫 <b>Источник «{site_name}» не парсится</b>\n"

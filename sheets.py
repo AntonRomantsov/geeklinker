@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import gspread
 from google.auth import default as google_auth_default
@@ -14,6 +16,21 @@ HYPERLINK_RE = re.compile(r'^=HYPERLINK\("([^"]*)"\s*[,;]\s*"(?:[^"]|"")*"\)$', 
 
 TARGET_SHEET_HEADERS = ["Источник", "Ссылка ", "Дата"]
 TARGET_SHEET_COLUMN_WIDTHS_PX = [200, 500, 100]
+
+LOG_SHEET_NAME = "Логи"
+LOG_SHEET_HEADERS = ["Дата и время", "Статус", "Новых статей", "Ошибок", "Удалено из _Dedup", "Детали ошибок"]
+LOG_SHEET_COLUMN_WIDTHS_PX = [140, 160, 90, 70, 110, 500]
+
+LOG_STATUS_LABELS = {
+    "success": "Успех",
+    "error": "Ошибка (не критично)",
+    "fatal": "Критическая ошибка",
+}
+LOG_STATUS_COLORS = {
+    "success": {"red": 0.85, "green": 0.94, "blue": 0.85},
+    "error": {"red": 1.0, "green": 0.9, "blue": 0.7},
+    "fatal": {"red": 0.96, "green": 0.78, "blue": 0.78},
+}
 
 
 @dataclass
@@ -106,6 +123,73 @@ class SheetsClient:
                             }
                         }
                         for i, width in enumerate(TARGET_SHEET_COLUMN_WIDTHS_PX)
+                    ]
+                }
+            )
+            return worksheet
+
+    def append_run_log(
+        self,
+        status: str,
+        new_articles: int,
+        errors_count: int,
+        dedup_removed: int,
+        error_details: str,
+    ) -> None:
+        worksheet = self._get_or_create_log_sheet()
+        timestamp = datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%d.%m.%Y %H:%M:%S")
+        label = LOG_STATUS_LABELS[status]
+        result = worksheet.append_row(
+            [timestamp, label, new_articles, errors_count, dedup_removed, error_details],
+            value_input_option="USER_ENTERED",
+        )
+        updated_range = result.get("updates", {}).get("updatedRange", "")
+        match = re.search(r"![A-Z]+(\d+)", updated_range)
+        if not match:
+            return
+        row_index = int(match.group(1)) - 1
+        self._spreadsheet.batch_update(
+            {
+                "requests": [
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": worksheet.id,
+                                "startRowIndex": row_index,
+                                "endRowIndex": row_index + 1,
+                                "startColumnIndex": 0,
+                                "endColumnIndex": len(LOG_SHEET_HEADERS),
+                            },
+                            "cell": {"userEnteredFormat": {"backgroundColor": LOG_STATUS_COLORS[status]}},
+                            "fields": "userEnteredFormat.backgroundColor",
+                        }
+                    }
+                ]
+            }
+        )
+
+    def _get_or_create_log_sheet(self) -> gspread.Worksheet:
+        try:
+            return self._spreadsheet.worksheet(LOG_SHEET_NAME)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = self._spreadsheet.add_worksheet(title=LOG_SHEET_NAME, rows=1000, cols=len(LOG_SHEET_HEADERS))
+            worksheet.append_row(LOG_SHEET_HEADERS, value_input_option="USER_ENTERED")
+            self._spreadsheet.batch_update(
+                {
+                    "requests": [
+                        {
+                            "updateDimensionProperties": {
+                                "range": {
+                                    "sheetId": worksheet.id,
+                                    "dimension": "COLUMNS",
+                                    "startIndex": i,
+                                    "endIndex": i + 1,
+                                },
+                                "properties": {"pixelSize": width},
+                                "fields": "pixelSize",
+                            }
+                        }
+                        for i, width in enumerate(LOG_SHEET_COLUMN_WIDTHS_PX)
                     ]
                 }
             )

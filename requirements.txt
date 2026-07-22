@@ -7,3 +7,4 @@ requests>=2.32
 google-genai>=0.3
 python-dotenv>=1.0
 google-cloud-scheduler>=2.13
+tzdata>=2024.1
