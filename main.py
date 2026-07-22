@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functions_framework
 
+from bot_webhook import telegram_webhook  # noqa: F401 - должна быть видна в main.py для functions-framework
 from config import Config
 from feeds import fetch_rss_items, fetch_scrape_items
 from notify import send_error_alert, send_new_article
