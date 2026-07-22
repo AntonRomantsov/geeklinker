@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import re
+
 import requests
 
 from config import Config
 from scheduler_admin import SchedulerAdmin, SchedulerError
 
 API_BASE = "https://api.telegram.org/bot{token}/{method}"
+
+EDIT_PROMPT_RE = re.compile(r"график «([^»]+)»")
 
 STATE_LABELS = {
     1: "▶ активен",  # ENABLED
@@ -61,9 +65,9 @@ def _menu_keyboard(jobs) -> dict:
             "text": "⏸ Пауза",
             "callback_data": f"pause|{name}",
         }
+        rows.append([toggle, {"text": "✏️ Изменить", "callback_data": f"editstart|{name}"}])
         rows.append(
             [
-                toggle,
                 {"text": "⚡ Запустить", "callback_data": f"run|{name}"},
                 {"text": "🗑 Удалить", "callback_data": f"delconfirm|{name}"},
             ]
@@ -147,6 +151,21 @@ def _handle_command(cfg: Config, chat_id: int, text: str) -> None:
     _send_message(cfg, chat_id, "Неизвестная команда. /help — список команд.")
 
 
+def _handle_edit_reply(cfg: Config, chat_id: int, name: str, text: str) -> None:
+    lines = _parse_multiline_command(text)
+    if not lines:
+        _send_message(cfg, chat_id, "Пустой ответ, изменение отменено.")
+        return
+    cron = lines[0]
+    timezone = lines[1] if len(lines) > 1 else None
+    try:
+        SchedulerAdmin(cfg).update_schedule(name, cron, timezone)
+        _send_message(cfg, chat_id, f"✅ График «{name}» обновлён.")
+    except SchedulerError as exc:
+        _send_message(cfg, chat_id, f"❌ {exc}")
+    _send_menu(cfg, chat_id)
+
+
 def _handle_callback(cfg: Config, callback_query: dict) -> None:
     chat_id = callback_query["message"]["chat"]["id"]
     callback_id = callback_query["id"]
@@ -169,6 +188,16 @@ def _handle_callback(cfg: Config, callback_query: dict) -> None:
         elif action == "run":
             admin.run_job(name)
             _answer_callback(cfg, callback_id, f"Запущено: {name}")
+        elif action == "editstart":
+            _answer_callback(cfg, callback_id)
+            _send_message(
+                cfg,
+                chat_id,
+                f"Новый график для «{name}» — ответьте на это сообщение.\n"
+                "Первая строка — cron, вторая (необязательно) — таймзона.",
+                {"force_reply": True},
+            )
+            return
         elif action == "delconfirm":
             _answer_callback(cfg, callback_id)
             _send_message(
@@ -212,6 +241,11 @@ def handle_update(cfg: Config, update: dict) -> None:
         return  # игнорируем сообщения не от владельца бота
 
     if message and "text" in message:
-        _handle_command(cfg, sender_chat_id, message["text"])
+        reply_to = message.get("reply_to_message") or {}
+        edit_match = EDIT_PROMPT_RE.search(reply_to.get("text", ""))
+        if edit_match:
+            _handle_edit_reply(cfg, sender_chat_id, edit_match.group(1), message["text"])
+        else:
+            _handle_command(cfg, sender_chat_id, message["text"])
     elif callback_query:
         _handle_callback(cfg, callback_query)
