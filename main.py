@@ -33,8 +33,15 @@ def _is_transient_error(exc: Exception) -> bool:
 def execute(dry_run: bool = False) -> str:
     cfg = Config.from_env()
 
+    run_started_at: str | None = None
     try:
         sheets = SheetsClient(cfg)
+        if not dry_run:
+            run_started_at = sheets.acquire_run_lock()
+            if run_started_at is None:
+                # Другой прогон ещё выполняется (моложе 5 минут) - молча выходим:
+                # ничего не пишем, ничего не отправляем.
+                return "Прогон уже выполняется - новый не запущен."
         active_sources = sheets.load_active_sources()
         dedup_links = sheets.load_dedup_links()
     except Exception as exc:
@@ -43,7 +50,7 @@ def execute(dry_run: bool = False) -> str:
         # Настройка не удалась - дальнейшая обработка в этом запуске невозможна.
         send_fatal_alert(cfg, str(exc))
         try:
-            SheetsClient(cfg).append_run_log("fatal", 0, 1, 0, str(exc))
+            SheetsClient(cfg).write_fatal_log_row(str(exc))
         except Exception:
             pass  # если и лог записать не получилось - не мешаем исходному исключению всплыть
         raise
@@ -191,9 +198,9 @@ def execute(dry_run: bool = False) -> str:
     try:
         if all_errors:
             details = "\n".join(message for message, _transient in all_errors)
-            sheets.append_run_log("error", new_articles, len(all_errors), dedup_removed, details)
+            sheets.finish_run_log(run_started_at, "error", new_articles, len(all_errors), dedup_removed, details)
         else:
-            sheets.append_run_log("success", new_articles, 0, dedup_removed, "")
+            sheets.finish_run_log(run_started_at, "success", new_articles, 0, dedup_removed, "")
     except Exception:
         pass  # не смогли записать лог - не роняем из-за этого сам прогон
 

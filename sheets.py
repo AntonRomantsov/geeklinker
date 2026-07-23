@@ -31,6 +31,8 @@ LOG_SHEET_HEADERS = [
 LOG_SHEET_COLUMN_WIDTHS_PX = [140, 160, 90, 70, 110, 500, 100]
 LOG_RETENTION_ROWS = 30
 LOG_KEEP_VALUES = {"нет", "0", ""}
+LOG_TIMESTAMP_FORMAT = "%d.%m.%Y %H:%M:%S"
+LOG_LOCK_WINDOW_MINUTES = 5
 
 LOG_STATUS_LABELS = {
     "success": "success",
@@ -162,25 +164,106 @@ class SheetsClient:
             )
             return worksheet
 
-    def append_run_log(
+    def acquire_run_lock(self) -> str | None:
+        """Проверяет верхнюю строку листа "Логи" перед стартом прогона.
+
+        - Если там недозаполненная строка (только метка времени, без статуса) моложе
+          LOG_LOCK_WINDOW_MINUTES - значит другой прогон ещё выполняется: молча
+          возвращает None, ничего не пишет и не отправляет.
+        - Если такая недозаполненная строка старше окна - считается зависшей
+          (прогон, её создавший, не завершился штатно): дозаполняется как красная
+          (fatal), после чего прогон продолжается как обычно.
+        - Иначе (верхняя строка дозаполнена или её нет вовсе) - блокировки нет.
+
+        В любом случае, если блокировки нет, вставляет свою строку с меткой времени
+        и возвращает эту метку - её нужно передать в finish_run_log() в конце.
+        """
+        worksheet = self._get_or_create_log_sheet()
+        row = worksheet.row_values(2)
+        timestamp_str = row[0] if row else ""
+        status_cell = row[1] if len(row) > 1 else ""
+
+        if timestamp_str and not status_cell:
+            try:
+                started_at = datetime.strptime(timestamp_str, LOG_TIMESTAMP_FORMAT)
+            except ValueError:
+                started_at = None
+            if started_at is not None:
+                elapsed = datetime.now(ZoneInfo("Europe/Kyiv")).replace(tzinfo=None) - started_at
+                if elapsed < timedelta(minutes=LOG_LOCK_WINDOW_MINUTES):
+                    return None  # другой прогон ещё выполняется - молча выходим
+                self._fill_hung_row(worksheet)
+
+        timestamp = datetime.now(ZoneInfo("Europe/Kyiv")).strftime(LOG_TIMESTAMP_FORMAT)
+        # RAW, а не USER_ENTERED - иначе Sheets распознаёт текст как настоящую дату/время
+        # и при чтении обратно переформатирует её по-своему (убирая ведущий ноль у часа),
+        # из-за чего finish_run_log() перестаёт находить свою строку по точному совпадению.
+        worksheet.insert_row([timestamp], index=2, value_input_option="RAW")
+        return timestamp
+
+    def _fill_hung_row(self, worksheet: gspread.Worksheet) -> None:
+        worksheet.update(
+            "B2:G2",
+            [
+                [
+                    LOG_STATUS_LABELS["fatal"],
+                    0,
+                    1,
+                    0,
+                    "Прогон не завершился штатно (обнаружен зависшим следующим запуском)",
+                    "нет",
+                ]
+            ],
+            value_input_option="USER_ENTERED",
+        )
+        self._format_log_row(worksheet, 2, "fatal")
+
+    def finish_run_log(
         self,
+        start_timestamp: str,
         status: str,
         new_articles: int,
         errors_count: int,
         dedup_removed: int,
         error_details: str,
     ) -> None:
+        """Дозаполняет строку, вставленную acquire_run_lock() в начале прогона.
+        Строка ищется по точному совпадению временной метки, а не по фиксированному
+        номеру - к этому моменту она могла сместиться вниз, если успел стартовать
+        ещё один (не заблокированный) прогон."""
         worksheet = self._get_or_create_log_sheet()
-        timestamp = datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%d.%m.%Y %H:%M:%S")
+        timestamps = worksheet.col_values(1)
+        try:
+            row_number = timestamps.index(start_timestamp) + 1
+        except ValueError:
+            row_number = 2  # не нашли (не должно происходить) - подстраховка
+
         label = LOG_STATUS_LABELS[status]
         processed = "да" if status == "success" else "нет"
-
-        # Новые записи вставляются сразу после заголовка - остальные сдвигаются вниз.
-        worksheet.insert_row(
-            [timestamp, label, new_articles, errors_count, dedup_removed, error_details, processed],
-            index=2,
+        worksheet.update(
+            f"B{row_number}:G{row_number}",
+            [[label, new_articles, errors_count, dedup_removed, error_details, processed]],
             value_input_option="USER_ENTERED",
         )
+        self._format_log_row(worksheet, row_number, status)
+        self._prune_log_sheet(worksheet)
+
+    def write_fatal_log_row(self, error_text: str) -> None:
+        """Пишет полностью готовую fatal-строку за один раз - используется только когда
+        не удалось даже настроиться (SheetsClient/чтение конфига), то есть до того, как
+        успела произойти попытка acquire_run_lock()."""
+        worksheet = self._get_or_create_log_sheet()
+        timestamp = datetime.now(ZoneInfo("Europe/Kyiv")).strftime(LOG_TIMESTAMP_FORMAT)
+        # RAW - см. комментарий в acquire_run_lock() про переформатирование метки времени.
+        worksheet.insert_row(
+            [timestamp, LOG_STATUS_LABELS["fatal"], 0, 1, 0, error_text, "нет"],
+            index=2,
+            value_input_option="RAW",
+        )
+        self._format_log_row(worksheet, 2, "fatal")
+        self._prune_log_sheet(worksheet)
+
+    def _format_log_row(self, worksheet: gspread.Worksheet, row_number: int, status: str) -> None:
         self._spreadsheet.batch_update(
             {
                 "requests": [
@@ -188,8 +271,8 @@ class SheetsClient:
                         "repeatCell": {
                             "range": {
                                 "sheetId": worksheet.id,
-                                "startRowIndex": 1,
-                                "endRowIndex": 2,
+                                "startRowIndex": row_number - 1,
+                                "endRowIndex": row_number,
                                 "startColumnIndex": 0,
                                 "endColumnIndex": len(LOG_SHEET_HEADERS),
                             },
@@ -207,16 +290,14 @@ class SheetsClient:
                             "dimensions": {
                                 "sheetId": worksheet.id,
                                 "dimension": "ROWS",
-                                "startIndex": 1,
-                                "endIndex": 2,
+                                "startIndex": row_number - 1,
+                                "endIndex": row_number,
                             }
                         }
                     },
                 ]
             }
         )
-
-        self._prune_log_sheet(worksheet)
 
     def _prune_log_sheet(self, worksheet: gspread.Worksheet) -> None:
         rows = worksheet.get_all_values()
