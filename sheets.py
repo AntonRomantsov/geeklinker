@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import gspread
 from google.auth import default as google_auth_default
 
 from config import Config
+from dates import DATE_FORMAT
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -117,6 +118,22 @@ class SheetsClient:
         worksheet = self._get_or_create_target_sheet(sheet_name)
         formula = _hyperlink_formula(link, title, self._formula_separator)
         worksheet.append_row([site_name, formula, pub_date], value_input_option="USER_ENTERED")
+
+    def sort_target_sheet_by_date(self, sheet_name: str) -> None:
+        """Пересортировывает лист по дате (колонка C) от самой ранней к самой поздней."""
+        try:
+            worksheet = self._spreadsheet.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            return
+
+        rows = worksheet.get_all_values(value_render_option="FORMULA")
+        if len(rows) <= 2:
+            return  # заголовок и максимум одна запись - сортировать нечего
+
+        header, data_rows = rows[0], rows[1:]
+        data_rows.sort(key=lambda row: _parse_sheet_date(row[2] if len(row) > 2 else ""))
+
+        worksheet.update("A1", [header] + data_rows, value_input_option="USER_ENTERED")
 
     def _get_or_create_target_sheet(self, sheet_name: str) -> gspread.Worksheet:
         try:
@@ -253,3 +270,21 @@ def _hyperlink_formula(url: str, title: str, separator: str) -> str:
 def _extract_link(cell_value: str) -> str:
     match = HYPERLINK_RE.match(cell_value.strip())
     return match.group(1) if match else cell_value.strip()
+
+
+SHEETS_DATE_EPOCH = date(1899, 12, 30)
+
+
+def _parse_sheet_date(value: str | int | float) -> date:
+    # Некоторые строки (например, из разовых скриптов миграции/бэкфилла) хранят дату не
+    # текстом "ДД.ММ.ГГГГ", а как настоящее Google Sheets значение типа "Дата" - тогда
+    # value_render_option="FORMULA" отдаёт его как число (дней с 30.12.1899).
+    if isinstance(value, (int, float)):
+        try:
+            return SHEETS_DATE_EPOCH + timedelta(days=value)
+        except OverflowError:
+            return date.min
+    try:
+        return datetime.strptime(value.strip(), DATE_FORMAT).date()
+    except (ValueError, TypeError):
+        return date.min  # нераспознанная дата - в начало списка, а не в конец

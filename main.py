@@ -55,6 +55,7 @@ def execute(dry_run: bool = False) -> str:
     other_errors: list[tuple[str, bool]] = []
     new_articles = 0
     sites_with_new_articles: set[str] = set()
+    target_sheets_written: set[str] = set()
 
     for source in active_sources:
         try:
@@ -136,6 +137,7 @@ def execute(dry_run: bool = False) -> str:
                         source.target_sheet, source.site_name, item.link, item.title, item.pub_date
                     )
                     send_new_article(cfg, source.site_name, source.target_sheet, item)
+                    target_sheets_written.add(source.target_sheet)
 
                 dedup_links.add(item.link)
                 target_links.add(item.link)
@@ -156,6 +158,12 @@ def execute(dry_run: bool = False) -> str:
     if dry_run:
         report.append(f"\nИтого: новых статей нашлось бы {new_articles}.")
         return "\n".join(report)
+
+    for sheet_name in target_sheets_written:
+        try:
+            sheets.sort_target_sheet_by_date(sheet_name)
+        except Exception as exc:  # noqa: BLE001 - сортировка не должна ронять весь прогон
+            other_errors.append((f"Сортировка листа «{sheet_name}»: {exc}", _is_transient_error(exc)))
 
     dedup_removed = 0
     for site_name in sites_with_new_articles:
