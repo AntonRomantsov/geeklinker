@@ -4,6 +4,7 @@ import sys
 
 import functions_framework
 import requests
+from google.genai import errors as genai_errors
 
 from bot_webhook import telegram_webhook  # noqa: F401 - должна быть видна в main.py для functions-framework
 from config import Config
@@ -27,7 +28,13 @@ def _is_transient_error(exc: Exception) -> bool:
         response = exc.response
         if response is not None and response.status_code in TRANSIENT_HTTP_STATUS_CODES:
             return True
+    if isinstance(exc, genai_errors.APIError) and exc.code in TRANSIENT_HTTP_STATUS_CODES:
+        return True
     return False
+
+
+def _error_details_mention(detail_blob: str, source_key: str) -> bool:
+    return any(line.startswith(source_key) for line in detail_blob.split("\n"))
 
 
 def execute(dry_run: bool = False) -> str:
@@ -37,11 +44,16 @@ def execute(dry_run: bool = False) -> str:
     try:
         sheets = SheetsClient(cfg)
         if not dry_run:
-            run_started_at = sheets.acquire_run_lock()
-            if run_started_at is None:
+            lock_result = sheets.acquire_run_lock()
+            if lock_result is None:
                 # Другой прогон ещё выполняется (моложе 5 минут) - молча выходим:
                 # ничего не пишем, ничего не отправляем.
                 return "Прогон уже выполняется - новый не запущен."
+            run_started_at, hung_message = lock_result
+            if hung_message:
+                # Красные ошибки уведомляются всегда, независимо от требует/не требует
+                # вмешательства.
+                send_fatal_alert(cfg, hung_message)
         active_sources = sheets.load_active_sources()
         dedup_links = sheets.load_dedup_links()
     except Exception as exc:
@@ -50,7 +62,8 @@ def execute(dry_run: bool = False) -> str:
         # Настройка не удалась - дальнейшая обработка в этом запуске невозможна.
         send_fatal_alert(cfg, str(exc))
         try:
-            SheetsClient(cfg).write_fatal_log_row(str(exc))
+            processed = "да" if _is_transient_error(exc) else "нет"
+            SheetsClient(cfg).write_fatal_log_row(str(exc), processed)
         except Exception:
             pass  # если и лог записать не получилось - не мешаем исходному исключению всплыть
         raise
@@ -166,6 +179,23 @@ def execute(dry_run: bool = False) -> str:
         report.append(f"\nИтого: новых статей нашлось бы {new_articles}.")
         return "\n".join(report)
 
+    if source_errors:
+        # Эскалация: даже транзиентная по типу ошибка перестаёт считаться "не требующей
+        # вмешательства", если она же повторяется у этого источника три раза подряд -
+        # значит сама по себе она не проходит.
+        recent_details = sheets.get_recent_error_details(2)
+        escalated_source_errors = []
+        for message, transient in source_errors:
+            source_key = message.split(":", 1)[0]
+            if (
+                transient
+                and len(recent_details) == 2
+                and all(_error_details_mention(detail, source_key) for detail in recent_details)
+            ):
+                transient = False
+            escalated_source_errors.append((message, transient))
+        source_errors = escalated_source_errors
+
     for sheet_name in target_sheets_written:
         try:
             sheets.sort_target_sheet_by_date(sheet_name)
@@ -185,22 +215,29 @@ def execute(dry_run: bool = False) -> str:
     except Exception as exc:  # noqa: BLE001 - чистка не должна ронять весь прогон
         other_errors.append((f"Чистка _Dedup от удалённых источников: {exc}", _is_transient_error(exc)))
 
-    # В Telegram уходят только ошибки обработки источников, которые не транзиентные -
-    # временные внешние сбои (403/429/5xx, таймауты) и ошибки чистки _Dedup туда не пишем.
-    telegram_worthy = [message for message, transient in source_errors if not transient]
+    all_errors = source_errors + other_errors
+
+    # В Telegram уходят все ошибки, которые требуют вмешательства (по критерию: сами не
+    # исчезнут при следующем прогоне) - и по источникам, и по обслуживающим шагам вроде
+    # сортировки/чистки _Dedup. Транзиентные (403/429/5xx, таймауты) - только в лог.
+    telegram_worthy = [message for message, transient in all_errors if not transient]
     if telegram_worthy:
         try:
             send_error_alert(cfg, telegram_worthy)
         except Exception as exc:  # noqa: BLE001 - все данные уже записаны, просто фиксируем как warning
             other_errors.append((f"Не удалось отправить уведомление в Telegram: {exc}", _is_transient_error(exc)))
+            all_errors = source_errors + other_errors  # пересчитать с учётом новой ошибки
 
-    all_errors = source_errors + other_errors
     try:
         if all_errors:
+            requires_intervention = any(not transient for _message, transient in all_errors)
+            processed = "нет" if requires_intervention else "да"
             details = "\n".join(message for message, _transient in all_errors)
-            sheets.finish_run_log(run_started_at, "error", new_articles, len(all_errors), dedup_removed, details)
+            sheets.finish_run_log(
+                run_started_at, "error", new_articles, len(all_errors), dedup_removed, details, processed
+            )
         else:
-            sheets.finish_run_log(run_started_at, "success", new_articles, 0, dedup_removed, "")
+            sheets.finish_run_log(run_started_at, "success", new_articles, 0, dedup_removed, "", "да")
     except Exception:
         pass  # не смогли записать лог - не роняем из-за этого сам прогон
 

@@ -44,6 +44,7 @@ LOG_STATUS_COLORS = {
     "error": {"red": 1.0, "green": 0.9, "blue": 0.7},
     "fatal": {"red": 0.96, "green": 0.78, "blue": 0.78},
 }
+LOG_IN_PROGRESS_COLOR = {"red": 1.0, "green": 1.0, "blue": 1.0}
 
 
 @dataclass
@@ -73,8 +74,10 @@ class SheetsClient:
         for i, row in enumerate(rows, start=2):
             if len(row) < 6:
                 continue
-            site_name, url, source_type, target_sheet, _engine, status = row[:6]
-            if status.strip().lower() == "активен" and url.strip():
+            site_name, url, source_type, target_sheet, engine, status = row[:6]
+            # engine == "gc" - источник обрабатывается этим скриптом (Google Cloud). Если
+            # источник аварийно переведён на Make (engine != "gc"), скрипт его не трогает.
+            if status.strip().lower() == "активен" and engine.strip().lower() == "gc" and url.strip():
                 sources.append(
                     SourceRow(
                         site_name=site_name.strip(),
@@ -92,6 +95,16 @@ class SheetsClient:
         полностью удалённых источников)."""
         rows = self._spreadsheet.worksheet(self._cfg.config_sheet_name).get_all_values()[1:]
         return [row[1].strip() for row in rows if len(row) > 1 and row[1].strip()]
+
+    def get_recent_error_details(self, count: int) -> list[str]:
+        """Возвращает содержимое колонки "Детали ошибок" последних count ЗАВЕРШЁННЫХ
+        прогонов (строки начиная с 3-й - 2-я строка в момент вызова обычно ещё "наша"
+        текущая незавершённая). Используется, чтобы определить, повторяется ли ошибка
+        одного и того же источника подряд из прогона в прогон."""
+        worksheet = self._get_or_create_log_sheet()
+        rows = worksheet.get_all_values()
+        data_rows = rows[2 : 2 + count]  # пропускаем заголовок (0) и текущую строку 2 (1)
+        return [row[5] if len(row) > 5 else "" for row in data_rows]
 
     def update_source_type(self, row_number: int, url: str, source_type: str) -> None:
         worksheet = self._spreadsheet.worksheet(self._cfg.config_sheet_name)
@@ -164,7 +177,7 @@ class SheetsClient:
             )
             return worksheet
 
-    def acquire_run_lock(self) -> str | None:
+    def acquire_run_lock(self) -> tuple[str, str | None] | None:
         """Проверяет верхнюю строку листа "Логи" перед стартом прогона.
 
         - Если там недозаполненная строка (только метка времени, без статуса) моложе
@@ -175,13 +188,16 @@ class SheetsClient:
           (fatal), после чего прогон продолжается как обычно.
         - Иначе (верхняя строка дозаполнена или её нет вовсе) - блокировки нет.
 
-        В любом случае, если блокировки нет, вставляет свою строку с меткой времени
-        и возвращает эту метку - её нужно передать в finish_run_log() в конце.
+        Если блокировки нет, вставляет свою строку с меткой времени и возвращает
+        (метка_времени, сообщение_о_зависшем_прогоне_или_None) - метку нужно передать
+        в finish_run_log() в конце, а сообщение (если есть) - отправить в Telegram
+        (красные ошибки уведомляются всегда, независимо от требует/не требует вмешательства).
         """
         worksheet = self._get_or_create_log_sheet()
         row = worksheet.row_values(2)
         timestamp_str = row[0] if row else ""
         status_cell = row[1] if len(row) > 1 else ""
+        hung_message: str | None = None
 
         if timestamp_str and not status_cell:
             try:
@@ -192,6 +208,10 @@ class SheetsClient:
                 elapsed = datetime.now(ZoneInfo("Europe/Kyiv")).replace(tzinfo=None) - started_at
                 if elapsed < timedelta(minutes=LOG_LOCK_WINDOW_MINUTES):
                     return None  # другой прогон ещё выполняется - молча выходим
+                hung_message = (
+                    f"Прогон, начатый {timestamp_str}, не завершился штатно "
+                    f"(обнаружено следующим запуском спустя {LOG_LOCK_WINDOW_MINUTES}+ минут)"
+                )
                 self._fill_hung_row(worksheet)
 
         timestamp = datetime.now(ZoneInfo("Europe/Kyiv")).strftime(LOG_TIMESTAMP_FORMAT)
@@ -199,7 +219,10 @@ class SheetsClient:
         # и при чтении обратно переформатирует её по-своему (убирая ведущий ноль у часа),
         # из-за чего finish_run_log() перестаёт находить свою строку по точному совпадению.
         worksheet.insert_row([timestamp], index=2, value_input_option="RAW")
-        return timestamp
+        # Insert наследует форматирование соседней строки (например, зелёный от предыдущего
+        # успешного прогона) - явно сбрасываем на белый, пока прогон не завершён.
+        self._set_row_background(worksheet, 2, LOG_IN_PROGRESS_COLOR)
+        return timestamp, hung_message
 
     def _fill_hung_row(self, worksheet: gspread.Worksheet) -> None:
         worksheet.update(
@@ -226,11 +249,16 @@ class SheetsClient:
         errors_count: int,
         dedup_removed: int,
         error_details: str,
+        processed: str,
     ) -> None:
         """Дозаполняет строку, вставленную acquire_run_lock() в начале прогона.
         Строка ищется по точному совпадению временной метки, а не по фиксированному
         номеру - к этому моменту она могла сместиться вниз, если успел стартовать
-        ещё один (не заблокированный) прогон."""
+        ещё один (не заблокированный) прогон.
+
+        processed передаётся явно вызывающим кодом (main.py), а не выводится из status:
+        "да", если все ошибки прогона не требуют вмешательства (сами исчезнут при
+        следующем прогоне), "нет" - если хотя бы одна требует внимания."""
         worksheet = self._get_or_create_log_sheet()
         timestamps = worksheet.col_values(1)
         try:
@@ -239,7 +267,6 @@ class SheetsClient:
             row_number = 2  # не нашли (не должно происходить) - подстраховка
 
         label = LOG_STATUS_LABELS[status]
-        processed = "да" if status == "success" else "нет"
         worksheet.update(
             f"B{row_number}:G{row_number}",
             [[label, new_articles, errors_count, dedup_removed, error_details, processed]],
@@ -248,7 +275,7 @@ class SheetsClient:
         self._format_log_row(worksheet, row_number, status)
         self._prune_log_sheet(worksheet)
 
-    def write_fatal_log_row(self, error_text: str) -> None:
+    def write_fatal_log_row(self, error_text: str, processed: str = "нет") -> None:
         """Пишет полностью готовую fatal-строку за один раз - используется только когда
         не удалось даже настроиться (SheetsClient/чтение конфига), то есть до того, как
         успела произойти попытка acquire_run_lock()."""
@@ -256,12 +283,33 @@ class SheetsClient:
         timestamp = datetime.now(ZoneInfo("Europe/Kyiv")).strftime(LOG_TIMESTAMP_FORMAT)
         # RAW - см. комментарий в acquire_run_lock() про переформатирование метки времени.
         worksheet.insert_row(
-            [timestamp, LOG_STATUS_LABELS["fatal"], 0, 1, 0, error_text, "нет"],
+            [timestamp, LOG_STATUS_LABELS["fatal"], 0, 1, 0, error_text, processed],
             index=2,
             value_input_option="RAW",
         )
         self._format_log_row(worksheet, 2, "fatal")
         self._prune_log_sheet(worksheet)
+
+    def _set_row_background(self, worksheet: gspread.Worksheet, row_number: int, color: dict) -> None:
+        self._spreadsheet.batch_update(
+            {
+                "requests": [
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": worksheet.id,
+                                "startRowIndex": row_number - 1,
+                                "endRowIndex": row_number,
+                                "startColumnIndex": 0,
+                                "endColumnIndex": len(LOG_SHEET_HEADERS),
+                            },
+                            "cell": {"userEnteredFormat": {"backgroundColor": color}},
+                            "fields": "userEnteredFormat.backgroundColor",
+                        }
+                    }
+                ]
+            }
+        )
 
     def _format_log_row(self, worksheet: gspread.Worksheet, row_number: int, status: str) -> None:
         self._spreadsheet.batch_update(
