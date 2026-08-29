@@ -1,6 +1,0 @@
-Баги: 
-
-1. Во время прогона строка с меткой времени должна быть белой, а не зеленой (закрываем все ошибки от 24.07.2026)
-2. При нажатии кнопки в Телеграм - три прогона подряд 
-3. Вчасно Звіт (https://vchasno.ua/category/fop/): 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}
-4. Обработчик должнен обрабатывать только записи с конфигом E = gc

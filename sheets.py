@@ -135,7 +135,20 @@ class SheetsClient:
         worksheet.append_row([site_name, formula, pub_date], value_input_option="USER_ENTERED")
 
     def sort_target_sheet_by_date(self, sheet_name: str) -> None:
-        """Пересортировывает лист по дате (колонка C) от самой ранней к самой поздней."""
+        """Пересортировывает лист по дате (колонка C) от самой ранней к самой поздней.
+
+        Строки переставляются нативной сортировкой Google Sheets (sortRange), а не
+        перезаписью всего листа - это не трогает содержимое ячеек A/B вообще. Это важно:
+        старая реализация читала весь лист и полностью перезаписывала его, из-за чего
+        у вручную вставленных гиперссылок (это "богатое" форматирование текста, а не
+        формула HYPERLINK) слетало форматирование - Values API его не видит и теряет
+        при перезаписи. Формулы HYPERLINK, которые пишет сам скрипт, от этого бага не
+        страдали (они читаются и пишутся как текст формулы), а вот ручные ссылки - да.
+
+        Единственное, что дозаписывается - колонка C (дата), и только в тех строках, где
+        она сейчас хранится текстом: нативная сортировка упорядочивает по фактическому
+        типу ячейки, а текстовые даты "ДД.ММ.ГГГГ" сортировались бы лексикографически
+        (неверно), а не хронологически. Колонки A/B при этом не трогаются."""
         try:
             worksheet = self._spreadsheet.worksheet(sheet_name)
         except gspread.exceptions.WorksheetNotFound:
@@ -145,10 +158,19 @@ class SheetsClient:
         if len(rows) <= 2:
             return  # заголовок и максимум одна запись - сортировать нечего
 
-        header, data_rows = rows[0], rows[1:]
-        data_rows.sort(key=lambda row: _parse_sheet_date(row[2] if len(row) > 2 else ""))
+        date_updates = []
+        for i, row in enumerate(rows[1:], start=2):
+            raw_date = row[2] if len(row) > 2 else ""
+            if not isinstance(raw_date, str) or not raw_date.strip():
+                continue  # уже настоящая дата (число) или пусто - трогать не нужно
+            parsed = _parse_sheet_date(raw_date)
+            if parsed != date.min:
+                date_updates.append({"range": f"C{i}", "values": [[parsed.strftime(DATE_FORMAT)]]})
 
-        worksheet.update("A1", [header] + data_rows, value_input_option="USER_ENTERED")
+        if date_updates:
+            worksheet.batch_update(date_updates, value_input_option="USER_ENTERED")
+
+        worksheet.sort((3, "asc"), range=f"A2:C{len(rows)}")
 
     def _get_or_create_target_sheet(self, sheet_name: str) -> gspread.Worksheet:
         try:
