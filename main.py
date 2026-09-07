@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 
 import functions_framework
+import gspread
 import requests
 from google.genai import errors as genai_errors
 
@@ -29,6 +30,8 @@ def _is_transient_error(exc: Exception) -> bool:
         if response is not None and response.status_code in TRANSIENT_HTTP_STATUS_CODES:
             return True
     if isinstance(exc, genai_errors.APIError) and exc.code in TRANSIENT_HTTP_STATUS_CODES:
+        return True
+    if isinstance(exc, gspread.exceptions.APIError) and exc.code in TRANSIENT_HTTP_STATUS_CODES:
         return True
     return False
 
