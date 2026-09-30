@@ -34,12 +34,26 @@ notify.py, browser_headers.py, rss_discovery.py. Извлечение стате
       На входе - JSON-файл со списком строк-описаний ошибок, встреченных
       за время работы скилла. Отправляет их одним сообщением в Telegram
       через GeekLinkerBot (тот же бот, что и у основного скрипта).
+
+  write_log <new_articles> <errors_count> <error_details_or_empty>
+      Пишет одну строку в лист "Логи" по тому же принципу, что и основной
+      скрипт (новая строка наверху, цвет по статусу), но ОДНИМ цельным
+      действием - не двухфазной вставкой, как делает скрипт. Так безопаснее:
+      двухфазная вставка (метка времени сначала, дозаполнение потом) - это
+      часть механизма блокировки параллельных прогонов скрипта, и если бы
+      скилл её тоже использовал, он мог бы случайно заблокировать реальный
+      прогон скрипта или спрятать от него зависшую строку. Поле "Детали
+      ошибок" всегда начинается с "[Claude AI Skill]" - с самим текстом
+      ошибок при errors_count > 0, либо одной этой пометкой при успешном
+      прогоне (errors_count == 0).
 """
 
 from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # На Windows stdout по умолчанию не UTF-8 - без этого кириллица портится не только
 # в отображении терминала, но и в байтах при перенаправлении в файл.
@@ -51,7 +65,7 @@ from config import Config  # noqa: E402
 from feeds import Article, _get_with_retry, fetch_rss_items  # noqa: E402
 from notify import _send, send_new_article  # noqa: E402
 from rss_discovery import is_allowed_by_robots  # noqa: E402
-from sheets import SheetsClient  # noqa: E402
+from sheets import LOG_STATUS_LABELS, LOG_TIMESTAMP_FORMAT, SheetsClient  # noqa: E402
 
 BLOCKED_TYPE = "!blocked"
 ENGINE_FOR_THIS_SKILL = "claude"
@@ -140,6 +154,37 @@ def cmd_notify_errors(errors_json_file: str) -> None:
     print(json.dumps({"sent": len(errors)}, ensure_ascii=False))
 
 
+def cmd_write_log(new_articles: str, errors_count: str, error_details: str) -> None:
+    cfg = Config.from_env()
+    client = SheetsClient(cfg)
+
+    new_articles_n = int(new_articles)
+    errors_count_n = int(errors_count)
+
+    if errors_count_n > 0:
+        status = "error"  # -> label "warning", оранжевая строка
+        processed = "нет"
+        details = "[Claude AI Skill]\n" + error_details if error_details else "[Claude AI Skill]"
+    else:
+        status = "success"
+        processed = "да"
+        details = "[Claude AI Skill]"
+
+    worksheet = client._get_or_create_log_sheet()
+    timestamp = datetime.now(ZoneInfo("Europe/Kyiv")).strftime(LOG_TIMESTAMP_FORMAT)
+    label = LOG_STATUS_LABELS[status]
+    # RAW, а не USER_ENTERED - иначе Sheets распознаёт метку времени как настоящую
+    # дату и переформатирует при чтении (та же причина, что и в sheets.py).
+    worksheet.insert_row(
+        [timestamp, label, new_articles_n, errors_count_n, 0, details, processed],
+        index=2,
+        value_input_option="RAW",
+    )
+    client._format_log_row(worksheet, 2, status)
+    client._prune_log_sheet(worksheet)
+    print(json.dumps({"logged": True, "status": status}, ensure_ascii=False))
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -160,6 +205,8 @@ def main() -> None:
         cmd_add_article(*args)
     elif command == "notify_errors":
         cmd_notify_errors(*args)
+    elif command == "write_log":
+        cmd_write_log(*args)
     else:
         print(f"Неизвестная команда: {command}", file=sys.stderr)
         sys.exit(1)
