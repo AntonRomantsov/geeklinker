@@ -3,3 +3,4 @@
 sa-key.json
 __pycache__/
 *.pyc
+.claude/skills/geeklinker-fallback/run_log.txt
