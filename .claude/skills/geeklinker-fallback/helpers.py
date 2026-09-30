@@ -8,9 +8,9 @@ notify.py, browser_headers.py, rss_discovery.py. Извлечение стате
 
 Команды:
   list_sources
-      Печатает JSON-список ВСЕХ активных источников (любой engine, кроме
-      !blocked) - и gc, и make. Этот скилл - подстраховка поверх обоих
-      обработчиков, поэтому фильтр по engine не применяется.
+      Печатает JSON-список активных источников с engine == "claude" (и
+      только их - другие источники, обслуживаемые gc/make, этот скилл не
+      трогает).
 
   fetch_rss <url>
       Парсит RSS напрямую (feedparser, без Gemini) и печатает JSON-список
@@ -29,6 +29,11 @@ notify.py, browser_headers.py, rss_discovery.py. Извлечение стате
       Добавляет статью в _Dedup и в целевой лист (тем же способом, что и
       основной скрипт - формула HYPERLINK), сортирует целевой лист по дате,
       отправляет уведомление в Telegram.
+
+  notify_errors <errors_json_file>
+      На входе - JSON-файл со списком строк-описаний ошибок, встреченных
+      за время работы скилла. Отправляет их одним сообщением в Telegram
+      через GeekLinkerBot (тот же бот, что и у основного скрипта).
 """
 
 from __future__ import annotations
@@ -44,11 +49,12 @@ sys.path.insert(0, ".")
 
 from config import Config  # noqa: E402
 from feeds import Article, _get_with_retry, fetch_rss_items  # noqa: E402
-from notify import send_new_article  # noqa: E402
+from notify import _send, send_new_article  # noqa: E402
 from rss_discovery import is_allowed_by_robots  # noqa: E402
 from sheets import SheetsClient  # noqa: E402
 
 BLOCKED_TYPE = "!blocked"
+ENGINE_FOR_THIS_SKILL = "claude"
 
 
 def cmd_list_sources() -> None:
@@ -61,6 +67,8 @@ def cmd_list_sources() -> None:
             continue
         site_name, url, source_type, target_sheet, engine, status = row[:6]
         if status.strip().lower() != "активен" or not url.strip():
+            continue
+        if engine.strip().lower() != ENGINE_FOR_THIS_SKILL:
             continue
         source_type = source_type.strip().lower()
         if source_type == BLOCKED_TYPE:
@@ -119,6 +127,19 @@ def cmd_add_article(site_name: str, target_sheet: str, url: str, title: str, pub
     print(json.dumps({"added": url, "target_sheet": target_sheet}, ensure_ascii=False))
 
 
+def cmd_notify_errors(errors_json_file: str) -> None:
+    cfg = Config.from_env()
+    errors = json.load(open(errors_json_file, encoding="utf-8"))
+    if not errors:
+        print(json.dumps({"skipped": "пустой список ошибок"}, ensure_ascii=False))
+        return
+    text = "⚠️ <b>GeekLinker: ошибки в AI-контуре (geeklinker-fallback)</b>\n\n" + "\n".join(
+        f"• {error}" for error in errors
+    )
+    _send(cfg, cfg.telegram_alert_chat_id, text)
+    print(json.dumps({"sent": len(errors)}, ensure_ascii=False))
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         print(__doc__)
@@ -137,6 +158,8 @@ def main() -> None:
         cmd_check_dedup(*args)
     elif command == "add_article":
         cmd_add_article(*args)
+    elif command == "notify_errors":
+        cmd_notify_errors(*args)
     else:
         print(f"Неизвестная команда: {command}", file=sys.stderr)
         sys.exit(1)
