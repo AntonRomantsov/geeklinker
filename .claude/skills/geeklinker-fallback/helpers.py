@@ -79,7 +79,7 @@ from google.genai import errors as genai_errors  # noqa: E402
 
 from config import Config  # noqa: E402
 from feeds import Article, _get_with_retry, fetch_rss_items  # noqa: E402
-from notify import _send, send_new_article  # noqa: E402
+from notify import _escape_html, _send, send_new_article  # noqa: E402
 from rss_discovery import is_allowed_by_robots  # noqa: E402
 from sheets import LOG_STATUS_LABELS, LOG_TIMESTAMP_FORMAT, SheetsClient  # noqa: E402
 
@@ -255,7 +255,7 @@ def cmd_finish_run(new_articles: str, errors_json_file: str) -> None:
     telegram_worthy = [e["message"] for e in errors if not e.get("transient")]
     if telegram_worthy:
         text = "⚠️ <b>GeekLinker: ошибки в AI-контуре (geeklinker-fallback)</b>\n\n" + "\n".join(
-            f"• {m}" for m in telegram_worthy
+            f"• {_escape_html(m)}" for m in telegram_worthy
         )
         _send(cfg, cfg.telegram_alert_chat_id, text)
 
@@ -283,7 +283,7 @@ def cmd_notify_errors(errors_json_file: str) -> None:
         print(json.dumps({"skipped": "пустой список ошибок"}, ensure_ascii=False))
         return
     text = "⚠️ <b>GeekLinker: ошибки в AI-контуре (geeklinker-fallback)</b>\n\n" + "\n".join(
-        f"• {error}" for error in errors
+        f"• {_escape_html(error)}" for error in errors
     )
     _send(cfg, cfg.telegram_alert_chat_id, text)
     print(json.dumps({"sent": len(errors)}, ensure_ascii=False))
