@@ -104,8 +104,15 @@ def _is_transient_error(exc: Exception) -> bool:
             return True
     if isinstance(exc, genai_errors.APIError) and exc.code in TRANSIENT_HTTP_STATUS_CODES:
         return True
-    if isinstance(exc, gspread.exceptions.APIError) and exc.code in TRANSIENT_HTTP_STATUS_CODES:
-        return True
+    if isinstance(exc, gspread.exceptions.APIError):
+        # exc.code - это код из тела ответа (JSON), а не обязательно настоящий HTTP-статус:
+        # если Google вместо JSON с ошибкой API отдал что-то другое (например, HTML-страницу
+        # инфраструктурной 502 от Google Frontend), gspread не может его разобрать и
+        # подставляет code=-1 как заглушку. Настоящий HTTP-статус при этом всё равно есть
+        # в exc.response - проверяем его в приоритете.
+        status_code = exc.response.status_code if exc.response is not None else exc.code
+        if status_code in TRANSIENT_HTTP_STATUS_CODES:
+            return True
     return False
 
 
